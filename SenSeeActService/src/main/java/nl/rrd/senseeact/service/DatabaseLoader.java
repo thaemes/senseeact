@@ -185,6 +185,7 @@ public class DatabaseLoader {
 		result.add(new WatchTableRegistrationTable());
 		result.add(new MobileWakeRequestTable());
 		result.add(new DataExportTable());
+		result.add(new DetoxOnsLookupTable());
 		result.add(new SystemStatTable());
 		result.add(new PerformanceStatTable());
 		OAuthTableRepository oauthRepo = AppComponents.get(

@@ -165,7 +165,9 @@ public class ProjectControllerExecution {
 		ProjectRepository projectRepo = AppComponents.get(
 				ProjectRepository.class);
 		for (String code : projectCodes) {
-			projects.add(projectRepo.findProjectByCode(code));
+			BaseProject project = projectRepo.findProjectByCode(code);
+			if (project != null)
+				projects.add(project);
 		}
 		return projects;
 	}
