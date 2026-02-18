@@ -273,6 +273,10 @@ public class DatabaseLoader {
 							DatabaseListenerRepository.getInstance();
 					listeners.addDatabaseActionListener(name,
 							new ProjectDatabaseActionListener(project));
+					if ("detox".equals(project)) {
+						listeners.addDatabaseActionListener(name,
+								new DetoxMessageQueueListener(project));
+					}
 					listeningDatabases.add(name);
 				}
 			}
