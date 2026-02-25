@@ -12,12 +12,6 @@ import nl.rrd.senseeact.dao.DatabaseType;
  * @author Dennis Hofs (RRD)
  */
 public class DetoxMessageQueue extends UTCSample {
-	@DatabaseField(value=DatabaseType.STRING, index=true)
-	private String ssaId;
-
-	@DatabaseField(value=DatabaseType.INT, index=true)
-	private int onsId;
-
 	@DatabaseField(value=DatabaseType.TEXT)
 	private String payload;
 
@@ -36,54 +30,14 @@ public class DetoxMessageQueue extends UTCSample {
 	 *
 	 * @param user the user (user ID)
 	 * @param tzTime the time
-	 * @param ssaId the SenSeeAct ID
-	 * @param onsId the ONS ID
 	 * @param payload the JSON payload
 	 * @param sentToOns true if already sent to ONS
 	 */
-	public DetoxMessageQueue(String user, ZonedDateTime tzTime, String ssaId,
-			int onsId, String payload, boolean sentToOns) {
+	public DetoxMessageQueue(String user, ZonedDateTime tzTime, String payload,
+			boolean sentToOns) {
 		super(user, tzTime);
-		this.ssaId = ssaId;
-		this.onsId = onsId;
 		this.payload = payload;
 		this.sentToOns = sentToOns;
-	}
-
-	/**
-	 * Returns the SenSeeAct ID.
-	 *
-	 * @return the SenSeeAct ID
-	 */
-	public String getSsaId() {
-		return ssaId;
-	}
-
-	/**
-	 * Sets the SenSeeAct ID.
-	 *
-	 * @param ssaId the SenSeeAct ID
-	 */
-	public void setSsaId(String ssaId) {
-		this.ssaId = ssaId;
-	}
-
-	/**
-	 * Returns the ONS ID.
-	 *
-	 * @return the ONS ID
-	 */
-	public int getOnsId() {
-		return onsId;
-	}
-
-	/**
-	 * Sets the ONS ID.
-	 *
-	 * @param onsId the ONS ID
-	 */
-	public void setOnsId(int onsId) {
-		this.onsId = onsId;
 	}
 
 	/**

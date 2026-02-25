@@ -48,4 +48,19 @@ public class DetoxOnsLookup extends BaseDatabaseObject {
 			return null;
 		return lookup.getOnsId();
 	}
+
+	public static DetoxOnsLookup save(Database authDb, String ssaId, int onsId)
+			throws DatabaseException {
+		DetoxOnsLookup lookup = findBySsaId(authDb, ssaId);
+		if (lookup == null) {
+			lookup = new DetoxOnsLookup();
+			lookup.setSsaId(ssaId);
+			lookup.setOnsId(onsId);
+			authDb.insert(DetoxOnsLookupTable.NAME, lookup);
+		} else {
+			lookup.setOnsId(onsId);
+			authDb.update(DetoxOnsLookupTable.NAME, lookup);
+		}
+		return lookup;
+	}
 }
