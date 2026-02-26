@@ -37,6 +37,15 @@ public class Configuration extends BaseConfiguration {
 	
 	public static final String WEB_URL = "webUrl";
 
+	public static final String DETOX_OUTGOING_MODE = "detoxOutgoingMode";
+	public static final String DETOX_OUTGOING_LOCAL_URL =
+			"detoxOutgoingLocalUrl";
+	public static final String DETOX_OUTGOING_ONS_URL = "detoxOutgoingOnsUrl";
+	public static final String DETOX_OUTGOING_MTLS_CERT_PATH =
+			"detoxOutgoingMtlsCertPath";
+	public static final String DETOX_OUTGOING_MTLS_KEY_PATH =
+			"detoxOutgoingMtlsKeyPath";
+
 	@Override
 	public String getBaseUrl() {
 		return get(BASE_URL);

@@ -18,22 +18,54 @@ import nl.rrd.utils.schedule.TaskScheduler;
 import org.slf4j.Logger;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.GeneralSecurityException;
+import java.security.KeyFactory;
+import java.security.KeyStore;
+import java.security.PrivateKey;
+import java.security.SecureRandom;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
+import java.security.spec.PKCS8EncodedKeySpec;
 import java.time.ZonedDateTime;
+import java.util.Base64;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManagerFactory;
 
 public class DetoxMessageQueueListener implements DatabaseActionListener {
+	// Toggle this for endpoint selection.
+	private static final boolean USE_ONS_ENDPOINT = true;
+
+	private static final String LOCAL_URL =
+			"http://host.docker.internal:4899";
+	private static final String ONS_URL =
+			"https://api-staging.ons.io/v0/openehr_dossier/back_channel/unauthorized/composition_wrappers";
+	private static final String ONS_MTLS_CERT_PATH =
+			"/etc/senseeact/ons/client.pem";
+	private static final String ONS_MTLS_KEY_PATH =
+			"/etc/senseeact/ons/client.key";
 	private static final int RETRY_INTERVAL = 15 * 60 * 1000;
 	private static final Object RETRY_TASK_LOCK = new Object();
 	private static final Set<String> RETRY_TASK_PROJECTS = new HashSet<>();
 
 	private final String project;
+	private final Object HTTP_CLIENT_LOCK = new Object();
+	private java.net.http.HttpClient plainHttpClient =
+			java.net.http.HttpClient.newHttpClient();
+	private java.net.http.HttpClient mtlsHttpClient = null;
+	private String mtlsClientConfigKey = null;
 
 	public DetoxMessageQueueListener(String project) {
 		this.project = project;
@@ -89,13 +121,24 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 
 	private boolean sendToOns(String recordId, String ssaId, String payload) {
 		Logger logger = AppComponents.getLogger(getClass().getSimpleName());
-		Integer onsId = findOnsId(ssaId);
+		OutgoingEndpoint endpoint;
+		try {
+			endpoint = getOutgoingEndpoint();
+		} catch (IllegalArgumentException ex) {
+			logger.error("Detox queue send failed: recordId={}, invalid endpoint config: {}",
+					recordId, ex.getMessage());
+			return false;
+		}
+		Integer onsId = null;
+		if (endpoint.requireOnsLookup) {
+			onsId = findOnsId(ssaId);
+		}
 		if (ssaId == null || ssaId.isBlank()) {
 			logger.error("Detox queue send failed: recordId={}, missing user",
 					recordId);
 			return false;
 		}
-		if (onsId == null) {
+		if (endpoint.requireOnsLookup && onsId == null) {
 			logger.error("Detox queue send failed: recordId={}, no ONS mapping for ssaId={}",
 					recordId, ssaId);
 			return false;
@@ -103,26 +146,26 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 		if (payload == null)
 			payload = "";
 		try {
-			java.net.http.HttpClient client =
-					java.net.http.HttpClient.newHttpClient();
+			java.net.http.HttpClient client = getHttpClient(endpoint);
 			HttpRequest request = HttpRequest.newBuilder()
-					.uri(URI.create("http://host.docker.internal:4899"))
-					.header("Content-Type", "text/plain; charset=utf-8")
+					.uri(endpoint.url)
+					.header("Content-Type", "application/json; charset=utf-8")
 					.POST(HttpRequest.BodyPublishers.ofString(payload))
 					.build();
 			HttpResponse<String> response = client.send(request,
 					HttpResponse.BodyHandlers.ofString());
 			if (response.statusCode() >= 200 && response.statusCode() < 300) {
-				logger.info("Detox queue sent: recordId={}, ssaId={}, onsId={}",
-						recordId, ssaId, onsId);
+				logger.info("Detox queue sent: recordId={}, endpoint={}, ssaId={}, onsId={}",
+						recordId, endpoint.mode, ssaId, onsId);
 				return true;
 			}
 			String body = response.body();
 			if (body != null && body.length() > 500)
 				body = body.substring(0, 500) + "...";
-			logger.error("Detox queue send failed: recordId={}, status={}, body={}",
-					recordId, response.statusCode(), body);
-		} catch (IOException ex) {
+			logger.error(
+					"Detox queue send failed: recordId={}, endpoint={}, status={}, body={}",
+					recordId, endpoint.mode, response.statusCode(), body);
+		} catch (IOException | GeneralSecurityException ex) {
 			logger.error("Detox queue send failed: recordId={}",
 					recordId, ex);
 		} catch (InterruptedException ex) {
@@ -131,6 +174,91 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 			Thread.currentThread().interrupt();
 		}
 		return false;
+	}
+
+	private OutgoingEndpoint getOutgoingEndpoint() {
+		if (USE_ONS_ENDPOINT) {
+			return new OutgoingEndpoint("ons", URI.create(ONS_URL), true, true);
+		}
+		return new OutgoingEndpoint("local", URI.create(LOCAL_URL), false,
+				false);
+	}
+
+	private java.net.http.HttpClient getHttpClient(OutgoingEndpoint endpoint)
+			throws GeneralSecurityException, IOException {
+		if (!endpoint.requireMtls)
+			return plainHttpClient;
+		String certPath = ONS_MTLS_CERT_PATH;
+		String keyPath = ONS_MTLS_KEY_PATH;
+		if (certPath == null || certPath.isBlank() ||
+				keyPath == null || keyPath.isBlank()) {
+			throw new GeneralSecurityException(
+					"mTLS is enabled but cert/key path constants are not configured");
+		}
+		String configKey = certPath + "|" + keyPath;
+		synchronized (HTTP_CLIENT_LOCK) {
+			if (mtlsHttpClient != null && configKey.equals(mtlsClientConfigKey))
+				return mtlsHttpClient;
+			SSLContext sslContext = buildMtlsContext(certPath, keyPath);
+			mtlsHttpClient = java.net.http.HttpClient.newBuilder()
+					.sslContext(sslContext)
+					.build();
+			mtlsClientConfigKey = configKey;
+			return mtlsHttpClient;
+		}
+	}
+
+	private SSLContext buildMtlsContext(String certPath, String keyPath)
+			throws GeneralSecurityException, IOException {
+		X509Certificate cert = readX509Certificate(certPath);
+		PrivateKey privateKey = readPrivateKey(keyPath);
+		KeyStore keyStore = KeyStore.getInstance("PKCS12");
+		char[] keyPassword = new char[0];
+		keyStore.load(null, null);
+		keyStore.setKeyEntry("client", privateKey, keyPassword,
+				new java.security.cert.Certificate[] { cert });
+		KeyManagerFactory kmf = KeyManagerFactory.getInstance(
+				KeyManagerFactory.getDefaultAlgorithm());
+		kmf.init(keyStore, keyPassword);
+		TrustManagerFactory tmf = TrustManagerFactory.getInstance(
+				TrustManagerFactory.getDefaultAlgorithm());
+		tmf.init((KeyStore) null);
+		SSLContext sslContext = SSLContext.getInstance("TLS");
+		sslContext.init(kmf.getKeyManagers(), tmf.getTrustManagers(),
+				new SecureRandom());
+		return sslContext;
+	}
+
+	private X509Certificate readX509Certificate(String certPath)
+			throws IOException, GeneralSecurityException {
+		CertificateFactory cf = CertificateFactory.getInstance("X.509");
+		try (InputStream in = Files.newInputStream(Path.of(certPath))) {
+			return (X509Certificate) cf.generateCertificate(in);
+		}
+	}
+
+	private PrivateKey readPrivateKey(String keyPath)
+			throws IOException, GeneralSecurityException {
+		String pem = Files.readString(Path.of(keyPath), StandardCharsets.UTF_8);
+		String normalized = normalizePrivateKeyPem(pem);
+		byte[] der = Base64.getDecoder().decode(normalized);
+		PKCS8EncodedKeySpec keySpec = new PKCS8EncodedKeySpec(der);
+		String[] algorithms = new String[] { "RSA", "EC", "DSA" };
+		for (String algorithm : algorithms) {
+			try {
+				return KeyFactory.getInstance(algorithm).generatePrivate(keySpec);
+			} catch (GeneralSecurityException ex) {
+				// Try next algorithm.
+			}
+		}
+		throw new GeneralSecurityException(
+				"Unsupported private key format. Expected PKCS#8 PEM (BEGIN PRIVATE KEY).");
+	}
+
+	private String normalizePrivateKeyPem(String pem) {
+		return pem.replace("-----BEGIN PRIVATE KEY-----", "")
+				.replace("-----END PRIVATE KEY-----", "")
+				.replaceAll("\\s", "");
 	}
 
 	private Integer findOnsId(String ssaId) {
@@ -175,14 +303,14 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 			};
 			List<DetoxMessageQueue> unsent = projectDb.select(
 					new DetoxMessageQueueTable(), criteria, 0, sort);
-			for (DetoxMessageQueue record : unsent) {
-				if (record == null || record.isSentToOns())
-					continue;
-				if (sendToOns(record.getId(), record.getUser(),
-						record.getPayload())) {
-					markSent(record.getId());
+				for (DetoxMessageQueue record : unsent) {
+					if (record == null || record.isSentToOns())
+						continue;
+					if (sendToOns(record.getId(), record.getUser(),
+							record.getPayload())) {
+						markSent(record.getId());
+					}
 				}
-			}
 		} catch (DatabaseException | IOException ex) {
 			logger.error("Failed to process unsent detox queue messages: " +
 					ex.getMessage(), ex);
@@ -241,6 +369,21 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 		public void run(Object context, String taskId, ZonedDateTime now,
 				ScheduleParams scheduleParams) {
 			sendUnsent();
+		}
+	}
+
+	private static class OutgoingEndpoint {
+		private final String mode;
+		private final URI url;
+		private final boolean requireMtls;
+		private final boolean requireOnsLookup;
+
+		public OutgoingEndpoint(String mode, URI url, boolean requireMtls,
+				boolean requireOnsLookup) {
+			this.mode = mode;
+			this.url = url;
+			this.requireMtls = requireMtls;
+			this.requireOnsLookup = requireOnsLookup;
 		}
 	}
 }
