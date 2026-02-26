@@ -12,11 +12,11 @@ import nl.rrd.senseeact.dao.DatabaseType;
  * @author Dennis Hofs (RRD)
  */
 public class DetoxMessageQueue extends UTCSample {
+	@DatabaseField(value=DatabaseType.STRING, index=true)
+	private String type;
+
 	@DatabaseField(value=DatabaseType.TEXT)
 	private String payload;
-
-	@DatabaseField(value=DatabaseType.BYTE, index=true)
-	private boolean sentToOns = false;
 
 	/**
 	 * Constructs a new empty message. This is used for DataAccessObjects and
@@ -30,49 +30,49 @@ public class DetoxMessageQueue extends UTCSample {
 	 *
 	 * @param user the user (user ID)
 	 * @param tzTime the time
+	 * @param type the message type (e.g. heartrate, bloodpressure)
 	 * @param payload the JSON payload
-	 * @param sentToOns true if already sent to ONS
 	 */
-	public DetoxMessageQueue(String user, ZonedDateTime tzTime, String payload,
-			boolean sentToOns) {
+	public DetoxMessageQueue(String user, ZonedDateTime tzTime, String type,
+			String payload) {
 		super(user, tzTime);
+		this.type = type;
 		this.payload = payload;
-		this.sentToOns = sentToOns;
 	}
 
 	/**
-	 * Returns the JSON payload.
+	 * Returns the message type.
 	 *
-	 * @return the JSON payload
+	 * @return the message type
+	 */
+	public String getType() {
+		return type;
+	}
+
+	/**
+	 * Sets the message type.
+	 *
+	 * @param type the message type
+	 */
+	public void setType(String type) {
+		this.type = type;
+	}
+
+	/**
+	 * Returns the compact JSON payload.
+	 *
+	 * @return the compact JSON payload
 	 */
 	public String getPayload() {
 		return payload;
 	}
 
 	/**
-	 * Sets the JSON payload.
+	 * Sets the compact JSON payload.
 	 *
-	 * @param payload the JSON payload
+	 * @param payload the compact JSON payload
 	 */
 	public void setPayload(String payload) {
 		this.payload = payload;
-	}
-
-	/**
-	 * Returns whether the message is sent to ONS.
-	 *
-	 * @return true if sent to ONS, false otherwise
-	 */
-	public boolean isSentToOns() {
-		return sentToOns;
-	}
-
-	/**
-	 * Sets whether the message is sent to ONS.
-	 *
-	 * @param sentToOns true if sent to ONS, false otherwise
-	 */
-	public void setSentToOns(boolean sentToOns) {
-		this.sentToOns = sentToOns;
 	}
 }

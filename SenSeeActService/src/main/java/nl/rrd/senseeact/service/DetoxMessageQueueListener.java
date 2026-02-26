@@ -1,7 +1,10 @@
 package nl.rrd.senseeact.service;
 
-import nl.rrd.senseeact.client.model.detox.DetoxMessageQueue;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import nl.rrd.senseeact.client.model.detox.DetoxMessageQueueTable;
+import nl.rrd.senseeact.client.model.detox.DetoxProcessedMessageQueue;
+import nl.rrd.senseeact.client.model.detox.DetoxProcessedMessageQueueTable;
 import nl.rrd.senseeact.dao.Database;
 import nl.rrd.senseeact.dao.DatabaseAction;
 import nl.rrd.senseeact.dao.DatabaseConnection;
@@ -10,6 +13,7 @@ import nl.rrd.senseeact.dao.DatabaseSort;
 import nl.rrd.senseeact.dao.listener.DatabaseActionListener;
 import nl.rrd.senseeact.service.model.DetoxOnsLookup;
 import nl.rrd.utils.AppComponents;
+import nl.rrd.utils.datetime.DateTimeUtils;
 import nl.rrd.utils.exception.DatabaseException;
 import nl.rrd.utils.schedule.AbstractScheduledTask;
 import nl.rrd.utils.schedule.ScheduleParams;
@@ -17,6 +21,9 @@ import nl.rrd.utils.schedule.TaskSchedule;
 import nl.rrd.utils.schedule.TaskScheduler;
 import org.slf4j.Logger;
 
+import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManagerFactory;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
@@ -40,9 +47,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import javax.net.ssl.KeyManagerFactory;
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.TrustManagerFactory;
 
 public class DetoxMessageQueueListener implements DatabaseActionListener {
 	// Toggle this for endpoint selection.
@@ -62,6 +66,7 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 
 	private final String project;
 	private final Object HTTP_CLIENT_LOCK = new Object();
+	private final ObjectMapper jsonMapper = new ObjectMapper();
 	private java.net.http.HttpClient plainHttpClient =
 			java.net.http.HttpClient.newHttpClient();
 	private java.net.http.HttpClient mtlsHttpClient = null;
@@ -83,11 +88,266 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 			Map<?,?> data = action.getData();
 			if (data == null)
 				continue;
-			if (isSentToOns(data))
-				continue;
-			if (sendToOns(action.getRecordId(), getString(data.get("user")),
-					getString(data.get("payload"))))
-				markSent(action.getRecordId());
+			processRawMessage(action.getRecordId(), data);
+		}
+	}
+
+	private void processRawMessage(String rawRecordId, Map<?,?> data) {
+		Logger logger = AppComponents.getLogger(getClass().getSimpleName());
+		String ssaId = getString(data.get("user"));
+		if (ssaId == null || ssaId.isBlank()) {
+			logger.error("Detox queue processing failed: recordId={}, missing user",
+					rawRecordId);
+			return;
+		}
+		String type = normalizeType(getString(data.get("type")));
+		if (type == null) {
+			logger.error("Detox queue processing failed: recordId={}, missing/invalid type",
+					rawRecordId);
+			return;
+		}
+		Integer onsId = findOnsId(ssaId);
+		if (onsId == null) {
+			logger.error("Detox queue processing failed: recordId={}, no ONS mapping for ssaId={}",
+					rawRecordId, ssaId);
+			return;
+		}
+		String compactPayload = getString(data.get("payload"));
+		String processedPayload;
+		try {
+			processedPayload = buildProcessedPayload(type, compactPayload, ssaId,
+					onsId);
+		} catch (IllegalArgumentException ex) {
+			logger.error("Detox queue processing failed: recordId={}, reason={}",
+					rawRecordId, ex.getMessage());
+			return;
+		}
+		DetoxProcessedMessageQueue processed = insertProcessedRecord(ssaId,
+				onsId, type, processedPayload);
+		if (processed == null)
+			return;
+		if (sendProcessedToOns(processed.getId(), processed.getUser(),
+				processed.getOnsId(), processed.getPayload())) {
+			markProcessedSent(processed.getId());
+		}
+	}
+
+	private String buildProcessedPayload(String type, String compactPayload,
+			String ssaId, int onsId) {
+		Map<String,Object> compact;
+		try {
+			String parsePayload = compactPayload;
+			if (parsePayload == null || parsePayload.isBlank())
+				parsePayload = "{}";
+			compact = jsonMapper.readValue(parsePayload, new TypeReference<>() {});
+		} catch (Exception ex) {
+			throw new IllegalArgumentException("Invalid compact payload JSON");
+		}
+		if ("heartrate".equals(type)) {
+			return buildHeartRatePayload(compact, onsId);
+		} else if ("bloodpressure".equals(type)) {
+			return buildBloodPressurePayload(compact, onsId);
+		} else {
+			throw new IllegalArgumentException("Unsupported type: " + type);
+		}
+	}
+
+	private String buildHeartRatePayload(Map<String,Object> compact, int onsId) {
+		double bpmValue = requireNumber(compact, "value");
+		int bpm = (int)Math.round(bpmValue);
+		String comment = "Opmerking";
+		if (compact.containsKey("comment")) {
+			Object commentValue = compact.get("comment");
+			if (commentValue != null && !commentValue.toString().isBlank())
+				comment = commentValue.toString();
+		}
+		String timestamp = DateTimeUtils.nowMs().toOffsetDateTime().toString();
+		Map<String,Object> paths = new LinkedHashMap<>();
+		paths.put(
+				"/content[id0.0.2,1]/data[id3,1]/events[id4,1]/time[1]/value",
+				timestamp);
+		paths.put(
+				"/content[id0.0.2,1]/data[id3,1]/events[id4,1]/data[id2,1]/items[id5,1]/value[id9004,1]/units",
+				"/min");
+		paths.put(
+				"/content[id0.0.2,1]/data[id3,1]/events[id4,1]/data[id2,1]/items[id1060,3]/value[id9032,1]/value",
+				comment);
+		paths.put(
+				"/content[id0.0.2,1]/data[id3,1]/events[id4,1]/data[id2,1]/items[id5,1]/value[id9004,1]/magnitude",
+				bpm);
+		paths.put(
+				"/content[id0.0.2,1]/data[id3,1]/events[id4,1]/data[id2,1]/items[id5,1]/value[id9004,1]/precision",
+				0);
+		paths.put(
+				"/content[id0.0.2,1]/protocol[id11,1]/items[id1020,1]/value[id9022.1,1]/defining_code[1]/code_string",
+				"at1035.1");
+		paths.put(
+				"/content[id0.0.2,1]/data[id3,1]/events[id4,1]/data[id2,1]/items[id6,2]/value[id9005,1]/defining_code[1]/code_string",
+				"at7");
+		paths.put(
+				"/content[id0.0.2,1]/data[id3,1]/events[id4,1]/data[id2,1]/items[id6,2]/value[id9005,1]/defining_code[1]/terminology_id[1]/value",
+				"ac9023");
+		try {
+			String pathsString = jsonMapper.writeValueAsString(paths);
+			Map<String,Object> wrapper = new LinkedHashMap<>();
+			wrapper.put("clientId", onsId);
+			wrapper.put("archetypeId",
+					"openEHR-EHR-COMPOSITION.pulse_report.v1.0.0");
+			wrapper.put("pathsAndValues", pathsString);
+			return jsonMapper.writeValueAsString(wrapper);
+		} catch (Exception ex) {
+			throw new IllegalArgumentException(
+					"Failed to build processed payload JSON");
+		}
+	}
+
+	private String buildBloodPressurePayload(Map<String,Object> compact,
+			int onsId) {
+		int diastolic = (int)Math.round(requireNumber(compact, "diastolic"));
+		int systolic = (int)Math.round(requireNumber(compact, "systolic"));
+		int meanArterialPressure = (int)Math.round(
+				requireNumber(compact, "meanArterialPressure", "map"));
+		String timestamp = compact.containsKey("timestamp") ?
+				compact.get("timestamp").toString() :
+				DateTimeUtils.nowMs().toOffsetDateTime().toString();
+		String comment = compact.containsKey("comment") ?
+				compact.get("comment").toString() : "Opmerking";
+
+		Map<String,Object> paths = new LinkedHashMap<>();
+		paths.put("/category[id8,1]/defining_code[1]/code_string", "433");
+		paths.put("/category[id8,1]/defining_code[1]/terminology_id[1]/value",
+				"openehr");
+		paths.put("/category[id8,1]/value", "event");
+		paths.put("/composer[1]/external_ref[1]/id[1]/@type", "HIER_OBJECT_ID");
+		paths.put("/composer[1]/external_ref[1]/id[1]/value",
+				"com.nedap.TE4776.employee::1497");
+		paths.put("/composer[1]/external_ref[1]/namespace", "demographic");
+		paths.put("/composer[1]/external_ref[1]/type", "PERSON");
+		paths.put("/content[id0.0.2,1]/data[id2,1]/events[id7,1]/data[id4,1]/items[id5,1]/value[id9010,1]/magnitude",
+				diastolic);
+		paths.put("/content[id0.0.2,1]/data[id2,1]/events[id7,1]/data[id4,1]/items[id5,1]/value[id9010,1]/precision",
+				0);
+		paths.put("/content[id0.0.2,1]/data[id2,1]/events[id7,1]/data[id4,1]/items[id5,1]/value[id9010,1]/units",
+				"mm[Hg]");
+		paths.put("/content[id0.0.2,1]/data[id2,1]/events[id7,1]/data[id4,1]/items[id6,2]/value[id9011,1]/magnitude",
+				systolic);
+		paths.put("/content[id0.0.2,1]/data[id2,1]/events[id7,1]/data[id4,1]/items[id6,2]/value[id9011,1]/precision",
+				0);
+		paths.put("/content[id0.0.2,1]/data[id2,1]/events[id7,1]/data[id4,1]/items[id6,2]/value[id9011,1]/units",
+				"mm[Hg]");
+		paths.put("/content[id0.0.2,1]/data[id2,1]/events[id7,1]/data[id4,1]/items[id1007,3]/value[id9012,1]/magnitude",
+				meanArterialPressure);
+		paths.put("/content[id0.0.2,1]/data[id2,1]/events[id7,1]/data[id4,1]/items[id1007,3]/value[id9012,1]/precision",
+				0);
+		paths.put("/content[id0.0.2,1]/data[id2,1]/events[id7,1]/data[id4,1]/items[id1007,3]/value[id9012,1]/units",
+				"mm[Hg]");
+		paths.put("/content[id0.0.2,1]/data[id2,1]/events[id7,1]/data[id4,1]/items[id34,4]/value[id9014,1]/value",
+				comment);
+		paths.put("/content[id0.0.2,1]/data[id2,1]/events[id7,1]/state[id8,1]/items[id9,1]/value[id9015,1]/defining_code[1]/code_string",
+				"at1002");
+		paths.put("/content[id0.0.2,1]/data[id2,1]/events[id7,1]/state[id8,1]/items[id9,1]/value[id9015,1]/defining_code[1]/terminology_id[1]/value",
+				"ac9061");
+		paths.put("/content[id0.0.2,1]/data[id2,1]/events[id7,1]/state[id8,1]/items[id9,1]/value[id9015,1]/value",
+				"Zittend");
+		paths.put("/content[id0.0.2,1]/data[id2,1]/events[id7,1]/time[1]/value",
+				timestamp);
+		paths.put("/content[id0.0.2,1]/protocol[id12,1]/items[id14,1]/value[id9034,1]/defining_code[1]/code_string",
+				"at18");
+		paths.put("/content[id0.0.2,1]/protocol[id12,1]/items[id14,1]/value[id9034,1]/defining_code[1]/terminology_id[1]/value",
+				"ac9039");
+		paths.put("/content[id0.0.2,1]/protocol[id12,1]/items[id14,1]/value[id9034,1]/value",
+				"Volwassene");
+		paths.put("/content[id0.0.2,1]/protocol[id12,1]/items[id15,2]/value[id9036,1]/@type",
+				"DV_CODED_TEXT");
+		paths.put("/content[id0.0.2,1]/protocol[id12,1]/items[id15,2]/value[id9036,1]/defining_code[1]/code_string",
+				"at27");
+		paths.put("/content[id0.0.2,1]/protocol[id12,1]/items[id15,2]/value[id9036,1]/defining_code[1]/terminology_id[1]/value",
+				"ac9066");
+		paths.put("/content[id0.0.2,1]/protocol[id12,1]/items[id15,2]/value[id9036,1]/value",
+				"Linkerarm");
+		paths.put("/content[id0.0.2,1]/protocol[id12,1]/items[id1036,3]/value[id9052,1]/defining_code[1]/code_string",
+				"at1040");
+		paths.put("/content[id0.0.2,1]/protocol[id12,1]/items[id1036,3]/value[id9052,1]/defining_code[1]/terminology_id[1]/value",
+				"ac9054");
+		paths.put("/content[id0.0.2,1]/protocol[id12,1]/items[id1036,3]/value[id9052,1]/value",
+				"Machinaal");
+		paths.put("/content[id0.0.2,1]/protocol[id12,1]/items[id1011,4]/value[id9037,1]/defining_code[1]/code_string",
+				"at1013");
+		paths.put("/content[id0.0.2,1]/protocol[id12,1]/items[id1011,4]/value[id9037,1]/defining_code[1]/terminology_id[1]/value",
+				"ac9009");
+		paths.put("/content[id0.0.2,1]/protocol[id12,1]/items[id1011,4]/value[id9037,1]/value",
+				"Fase V");
+		try {
+			String pathsString = jsonMapper.writeValueAsString(paths);
+			Map<String,Object> wrapper = new LinkedHashMap<>();
+			wrapper.put("clientId", onsId);
+			wrapper.put("archetypeId",
+					"openEHR-EHR-COMPOSITION.blood_pressure_report.v1.0.0");
+			wrapper.put("pathsAndValues", pathsString);
+			return jsonMapper.writeValueAsString(wrapper);
+		} catch (Exception ex) {
+			throw new IllegalArgumentException(
+					"Failed to build processed payload JSON");
+		}
+	}
+
+	private double requireNumber(Map<String,Object> map, String key) {
+		Object value = map.get(key);
+		if (value == null)
+			throw new IllegalArgumentException("Missing required field: " + key);
+		if (value instanceof Number number)
+			return number.doubleValue();
+		if (value instanceof String strValue) {
+			try {
+				return Double.parseDouble(strValue);
+			} catch (NumberFormatException ex) {
+				throw new IllegalArgumentException("Invalid number for field: " +
+						key);
+			}
+		}
+		throw new IllegalArgumentException("Invalid number for field: " + key);
+	}
+
+	private double requireNumber(Map<String,Object> map, String key,
+			String fallbackKey) {
+		if (map.containsKey(key))
+			return requireNumber(map, key);
+		return requireNumber(map, fallbackKey);
+	}
+
+	private String normalizeType(String type) {
+		if (type == null)
+			return null;
+		String normalized = type.toLowerCase().replaceAll("[_\\s-]", "");
+		if ("heartrate".equals(normalized) || "heart".equals(normalized))
+			return "heartrate";
+		if ("bloodpressure".equals(normalized) || "blood".equals(normalized))
+			return "bloodpressure";
+		return null;
+	}
+
+	private DetoxProcessedMessageQueue insertProcessedRecord(String user,
+			int onsId, String type, String processedPayload) {
+		Logger logger = AppComponents.getLogger(getClass().getSimpleName());
+		DatabaseLoader dbLoader = DatabaseLoader.getInstance();
+		DatabaseConnection conn = null;
+		try {
+			conn = dbLoader.openConnection();
+			Database projectDb = dbLoader.initProjectDatabase(conn, project);
+			if (projectDb == null)
+				return null;
+			DetoxProcessedMessageQueue record = new DetoxProcessedMessageQueue(
+					user, DateTimeUtils.nowMs(), onsId, type, processedPayload,
+					false);
+			projectDb.insert(DetoxProcessedMessageQueueTable.NAME, record);
+			return record;
+		} catch (DatabaseException | IOException ex) {
+			logger.error("Failed to insert processed detox queue message: {}",
+					ex.getMessage(), ex);
+			return null;
+		} finally {
+			if (conn != null)
+				conn.close();
 		}
 	}
 
@@ -102,47 +362,10 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 		}
 	}
 
-	private boolean isSentToOns(Map<?,?> data) {
-		Object value = data.get("sentToOns");
-		if (value == null)
-			return false;
-		if (value instanceof Boolean boolValue)
-			return boolValue;
-		if (value instanceof Number numValue)
-			return numValue.intValue() != 0;
-		if (value instanceof String strValue) {
-			if (strValue.equalsIgnoreCase("true"))
-				return true;
-			if (strValue.equals("1"))
-				return true;
-		}
-		return false;
-	}
-
-	private boolean sendToOns(String recordId, String ssaId, String payload) {
+	private boolean sendProcessedToOns(String recordId, String ssaId, int onsId,
+			String payload) {
 		Logger logger = AppComponents.getLogger(getClass().getSimpleName());
-		OutgoingEndpoint endpoint;
-		try {
-			endpoint = getOutgoingEndpoint();
-		} catch (IllegalArgumentException ex) {
-			logger.error("Detox queue send failed: recordId={}, invalid endpoint config: {}",
-					recordId, ex.getMessage());
-			return false;
-		}
-		Integer onsId = null;
-		if (endpoint.requireOnsLookup) {
-			onsId = findOnsId(ssaId);
-		}
-		if (ssaId == null || ssaId.isBlank()) {
-			logger.error("Detox queue send failed: recordId={}, missing user",
-					recordId);
-			return false;
-		}
-		if (endpoint.requireOnsLookup && onsId == null) {
-			logger.error("Detox queue send failed: recordId={}, no ONS mapping for ssaId={}",
-					recordId, ssaId);
-			return false;
-		}
+		OutgoingEndpoint endpoint = getOutgoingEndpoint();
 		if (payload == null)
 			payload = "";
 		try {
@@ -155,7 +378,8 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 			HttpResponse<String> response = client.send(request,
 					HttpResponse.BodyHandlers.ofString());
 			if (response.statusCode() >= 200 && response.statusCode() < 300) {
-				logger.info("Detox queue sent: recordId={}, endpoint={}, ssaId={}, onsId={}",
+				logger.info(
+						"Detox queue sent: recordId={}, endpoint={}, ssaId={}, onsId={}",
 						recordId, endpoint.mode, ssaId, onsId);
 				return true;
 			}
@@ -166,11 +390,10 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 					"Detox queue send failed: recordId={}, endpoint={}, status={}, body={}",
 					recordId, endpoint.mode, response.statusCode(), body);
 		} catch (IOException | GeneralSecurityException ex) {
-			logger.error("Detox queue send failed: recordId={}",
-					recordId, ex);
+			logger.error("Detox queue send failed: recordId={}", recordId, ex);
 		} catch (InterruptedException ex) {
-			logger.error("Detox queue send interrupted: recordId={}",
-					recordId, ex);
+			logger.error("Detox queue send interrupted: recordId={}", recordId,
+					ex);
 			Thread.currentThread().interrupt();
 		}
 		return false;
@@ -178,10 +401,9 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 
 	private OutgoingEndpoint getOutgoingEndpoint() {
 		if (USE_ONS_ENDPOINT) {
-			return new OutgoingEndpoint("ons", URI.create(ONS_URL), true, true);
+			return new OutgoingEndpoint("ons", URI.create(ONS_URL), true);
 		}
-		return new OutgoingEndpoint("local", URI.create(LOCAL_URL), false,
-				false);
+		return new OutgoingEndpoint("local", URI.create(LOCAL_URL), false);
 	}
 
 	private java.net.http.HttpClient getHttpClient(OutgoingEndpoint endpoint)
@@ -190,8 +412,8 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 			return plainHttpClient;
 		String certPath = ONS_MTLS_CERT_PATH;
 		String keyPath = ONS_MTLS_KEY_PATH;
-		if (certPath == null || certPath.isBlank() ||
-				keyPath == null || keyPath.isBlank()) {
+		if (certPath == null || certPath.isBlank() || keyPath == null ||
+				keyPath.isBlank()) {
 			throw new GeneralSecurityException(
 					"mTLS is enabled but cert/key path constants are not configured");
 		}
@@ -272,7 +494,8 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 			return DetoxOnsLookup.findOnsId(authDb, ssaId);
 		} catch (DatabaseException | IOException ex) {
 			Logger logger = AppComponents.getLogger(getClass().getSimpleName());
-			logger.error("Failed to resolve ONS ID from lookup table for ssaId={}",
+			logger.error(
+					"Failed to resolve ONS ID from lookup table for ssaId={}",
 					ssaId, ex);
 			return null;
 		} finally {
@@ -301,16 +524,16 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 			DatabaseSort[] sort = new DatabaseSort[] {
 					new DatabaseSort("utcTime", true)
 			};
-			List<DetoxMessageQueue> unsent = projectDb.select(
-					new DetoxMessageQueueTable(), criteria, 0, sort);
-				for (DetoxMessageQueue record : unsent) {
-					if (record == null || record.isSentToOns())
-						continue;
-					if (sendToOns(record.getId(), record.getUser(),
-							record.getPayload())) {
-						markSent(record.getId());
-					}
+			List<DetoxProcessedMessageQueue> unsent = projectDb.select(
+					new DetoxProcessedMessageQueueTable(), criteria, 0, sort);
+			for (DetoxProcessedMessageQueue record : unsent) {
+				if (record == null || record.isSentToOns())
+					continue;
+				if (sendProcessedToOns(record.getId(), record.getUser(),
+						record.getOnsId(), record.getPayload())) {
+					markProcessedSent(record.getId());
 				}
+			}
 		} catch (DatabaseException | IOException ex) {
 			logger.error("Failed to process unsent detox queue messages: " +
 					ex.getMessage(), ex);
@@ -320,7 +543,7 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 		}
 	}
 
-	private void markSent(String recordId) {
+	private void markProcessedSent(String recordId) {
 		Logger logger = AppComponents.getLogger(getClass().getSimpleName());
 		DatabaseLoader dbLoader = DatabaseLoader.getInstance();
 		DatabaseConnection conn = null;
@@ -329,24 +552,26 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 			Database projectDb = dbLoader.initProjectDatabase(conn, project);
 			DatabaseCriteria criteria = new DatabaseCriteria.Equal("id",
 					recordId);
-			DetoxMessageQueue record = projectDb.selectOne(
-					new DetoxMessageQueueTable(), criteria, null);
+			DetoxProcessedMessageQueue record = projectDb.selectOne(
+					new DetoxProcessedMessageQueueTable(), criteria, null);
 			if (record == null) {
-				logger.error("Detox queue record not found for sent update: id={}",
+				logger.error(
+						"Detox processed queue record not found for sent update: id={}",
 						recordId);
 				return;
 			}
 			Map<String,Object> values = new LinkedHashMap<>();
 			values.put("sentToOns", 1);
-			projectDb.update(new DetoxMessageQueueTable(), criteria, values);
-			DetoxMessageQueue updated = projectDb.selectOne(
-					new DetoxMessageQueueTable(), criteria, null);
+			projectDb.update(new DetoxProcessedMessageQueueTable(), criteria,
+					values);
+			DetoxProcessedMessageQueue updated = projectDb.selectOne(
+					new DetoxProcessedMessageQueueTable(), criteria, null);
 			if (updated != null && !updated.isSentToOns()) {
-				logger.error("Detox queue sent flag did not update: id={}",
+				logger.error("Detox processed queue sent flag did not update: id={}",
 						recordId);
 			}
 		} catch (DatabaseException | IOException ex) {
-			logger.error("Failed to mark detox queue message as sent: " +
+			logger.error("Failed to mark detox processed queue message as sent: " +
 					ex.getMessage(), ex);
 		} finally {
 			if (conn != null)
@@ -376,14 +601,11 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 		private final String mode;
 		private final URI url;
 		private final boolean requireMtls;
-		private final boolean requireOnsLookup;
 
-		public OutgoingEndpoint(String mode, URI url, boolean requireMtls,
-				boolean requireOnsLookup) {
+		public OutgoingEndpoint(String mode, URI url, boolean requireMtls) {
 			this.mode = mode;
 			this.url = url;
 			this.requireMtls = requireMtls;
-			this.requireOnsLookup = requireOnsLookup;
 		}
 	}
 }
