@@ -10,6 +10,8 @@ import nl.rrd.senseeact.client.model.*;
 import nl.rrd.senseeact.client.model.compat.ProjectV1;
 import nl.rrd.senseeact.client.model.compat.ProjectV2;
 import nl.rrd.senseeact.client.model.compat.ProjectV3;
+import nl.rrd.senseeact.client.model.detox.DetoxMessageQueue;
+import nl.rrd.senseeact.client.model.detox.DetoxMessageQueueTable;
 import nl.rrd.senseeact.client.model.sample.LocalTimeSample;
 import nl.rrd.senseeact.client.model.sample.Sample;
 import nl.rrd.senseeact.client.model.sample.UTCSample;
@@ -45,6 +47,7 @@ import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
@@ -53,6 +56,8 @@ import java.util.*;
 public class ProjectControllerExecution {
 	private static final int BATCH_SIZE = 1000;
 	public static final int HANGING_GET_TIMEOUT = 60000;
+	private static final ObjectMapper DETOX_PAYLOAD_JSON_MAPPER =
+			new ObjectMapper();
 
 	/**
 	 * Runs the list query.
@@ -1398,7 +1403,90 @@ public class ProjectControllerExecution {
 		ZoneId defaultTz = subject != null ? subject.toTimeZone() :
 				user.toTimeZone();
 		CommonCrudController.validateWriteRecordTime(defaultTz, result, map);
+		validateDetoxQueueWriteRecord(table, result, defaultTz);
 		return result;
+	}
+
+	private void validateDetoxQueueWriteRecord(DatabaseTableDef<?> table,
+			DatabaseObject record, ZoneId defaultTz) throws HttpException {
+		if (!DetoxMessageQueueTable.NAME.equals(table.getName()) ||
+				!(record instanceof DetoxMessageQueue detoxMessage)) {
+			return;
+		}
+		// Normalize detox queue time fields to the caller/subject timezone so
+		// downstream integrations can use regional wall time consistently.
+		ZonedDateTime normalizedTzTime = ZonedDateTime.ofInstant(
+				Instant.ofEpochMilli(detoxMessage.getUtcTime()), defaultTz);
+		detoxMessage.updateDateTime(normalizedTzTime);
+		String normalizedType = normalizeDetoxType(detoxMessage.getType());
+		if (normalizedType == null) {
+			throw BadRequestException.withInvalidInput(new HttpFieldError("type",
+					"Unsupported type. Allowed values: heartrate, bloodpressure"));
+		}
+		detoxMessage.setType(normalizedType);
+		Map<?,?> payload = parseDetoxPayload(detoxMessage.getPayload());
+		if ("heartrate".equals(normalizedType)) {
+			requireDetoxNumber(payload, "value");
+		} else if ("bloodpressure".equals(normalizedType)) {
+			requireDetoxNumber(payload, "diastolic");
+			requireDetoxNumber(payload, "systolic");
+			if (payload.containsKey("meanArterialPressure"))
+				requireDetoxNumber(payload, "meanArterialPressure");
+			else
+				requireDetoxNumber(payload, "map");
+		}
+	}
+
+	private Map<?,?> parseDetoxPayload(String payloadValue) throws HttpException {
+		if (payloadValue == null || payloadValue.isBlank()) {
+			throw BadRequestException.withInvalidInput(new HttpFieldError(
+					"payload", "payload must be a non-empty JSON object string"));
+		}
+		Object parsed;
+		try {
+			parsed = DETOX_PAYLOAD_JSON_MAPPER.readValue(payloadValue,
+					Object.class);
+		} catch (IOException ex) {
+			throw BadRequestException.withInvalidInput(new HttpFieldError(
+					"payload", "payload must be valid JSON object text"));
+		}
+		if (!(parsed instanceof Map<?,?> map)) {
+			throw BadRequestException.withInvalidInput(new HttpFieldError(
+					"payload", "payload must be a JSON object"));
+		}
+		return map;
+	}
+
+	private static String normalizeDetoxType(String type) {
+		if (type == null)
+			return null;
+		String normalized = type.toLowerCase().replaceAll("[_\\s-]", "");
+		if ("heartrate".equals(normalized) || "heart".equals(normalized))
+			return "heartrate";
+		if ("bloodpressure".equals(normalized) || "blood".equals(normalized))
+			return "bloodpressure";
+		return null;
+	}
+
+	private static void requireDetoxNumber(Map<?,?> map, String key)
+			throws HttpException {
+		Object value = map.get(key);
+		if (value == null) {
+			throw BadRequestException.withInvalidInput(new HttpFieldError(
+					"payload", "Missing required numeric field \"" + key + "\""));
+		}
+		if (value instanceof Number)
+			return;
+		if (value instanceof String stringValue) {
+			try {
+				Double.parseDouble(stringValue);
+				return;
+			} catch (NumberFormatException ignored) {
+				// throw below
+			}
+		}
+		throw BadRequestException.withInvalidInput(new HttpFieldError("payload",
+				"Invalid numeric field \"" + key + "\""));
 	}
 
 	/**

@@ -12,6 +12,9 @@ import nl.rrd.senseeact.dao.DatabaseCriteria;
 import nl.rrd.senseeact.dao.DatabaseSort;
 import nl.rrd.senseeact.dao.listener.DatabaseActionListener;
 import nl.rrd.senseeact.service.model.DetoxOnsLookup;
+import nl.rrd.senseeact.service.model.User;
+import nl.rrd.senseeact.service.model.UserCache;
+import nl.rrd.senseeact.service.model.UserTable;
 import nl.rrd.utils.AppComponents;
 import nl.rrd.utils.datetime.DateTimeUtils;
 import nl.rrd.utils.exception.DatabaseException;
@@ -40,7 +43,13 @@ import java.security.SecureRandom;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.security.spec.PKCS8EncodedKeySpec;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.Base64;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -60,9 +69,15 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 			"/etc/senseeact/ons/client.pem";
 	private static final String ONS_MTLS_KEY_PATH =
 			"/etc/senseeact/ons/client.key";
+	private static final String PROP_OUTGOING_URL =
+			"senseeact.detox.outgoing.url";
+	private static final String PROP_OUTGOING_MTLS =
+			"senseeact.detox.outgoing.mtls";
 	private static final int RETRY_INTERVAL = 15 * 60 * 1000;
 	private static final Object RETRY_TASK_LOCK = new Object();
 	private static final Set<String> RETRY_TASK_PROJECTS = new HashSet<>();
+	private static final DateTimeFormatter ONS_UTC_TIME_FORMAT =
+			DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssXX");
 
 	private final String project;
 	private final Object HTTP_CLIENT_LOCK = new Object();
@@ -73,8 +88,13 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 	private String mtlsClientConfigKey = null;
 
 	public DetoxMessageQueueListener(String project) {
+		this(project, true);
+	}
+
+	DetoxMessageQueueListener(String project, boolean scheduleRetry) {
 		this.project = project;
-		scheduleRetryTask();
+		if (scheduleRetry)
+			scheduleRetryTask();
 	}
 
 	@Override
@@ -115,8 +135,18 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 		String compactPayload = getString(data.get("payload"));
 		String processedPayload;
 		try {
+			ZoneId queueZone = parseZoneId(data.get("timezone"));
+			ZoneId effectiveZone = resolveUserZoneId(ssaId, queueZone);
+			String fallbackOnsTimestamp = toOnsTimestampString(data.get("utcTime"),
+					effectiveZone);
+			logger.info(
+					"Detox timestamp mapping: recordId={}, queueTimezone={}, effectiveTimezone={}, localTime={}, utcTime={}, onsTimestamp={}",
+					rawRecordId, getString(data.get("timezone")),
+					effectiveZone.getId(),
+					getString(data.get("localTime")), getString(data.get("utcTime")),
+					fallbackOnsTimestamp);
 			processedPayload = buildProcessedPayload(type, compactPayload, ssaId,
-					onsId);
+					onsId, fallbackOnsTimestamp, effectiveZone);
 		} catch (IllegalArgumentException ex) {
 			logger.error("Detox queue processing failed: recordId={}, reason={}",
 					rawRecordId, ex.getMessage());
@@ -133,7 +163,8 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 	}
 
 	private String buildProcessedPayload(String type, String compactPayload,
-			String ssaId, int onsId) {
+			String ssaId, int onsId, String fallbackOnsTimestamp,
+			ZoneId queueZone) {
 		Map<String,Object> compact;
 		try {
 			String parsePayload = compactPayload;
@@ -144,15 +175,17 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 			throw new IllegalArgumentException("Invalid compact payload JSON");
 		}
 		if ("heartrate".equals(type)) {
-			return buildHeartRatePayload(compact, onsId);
+			return buildHeartRatePayload(compact, onsId, fallbackOnsTimestamp);
 		} else if ("bloodpressure".equals(type)) {
-			return buildBloodPressurePayload(compact, onsId);
+			return buildBloodPressurePayload(compact, onsId, fallbackOnsTimestamp,
+					queueZone);
 		} else {
 			throw new IllegalArgumentException("Unsupported type: " + type);
 		}
 	}
 
-	private String buildHeartRatePayload(Map<String,Object> compact, int onsId) {
+	private String buildHeartRatePayload(Map<String,Object> compact, int onsId,
+			String fallbackOnsTimestamp) {
 		double bpmValue = requireNumber(compact, "value");
 		int bpm = (int)Math.round(bpmValue);
 		String comment = "Opmerking";
@@ -161,7 +194,7 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 			if (commentValue != null && !commentValue.toString().isBlank())
 				comment = commentValue.toString();
 		}
-		String timestamp = DateTimeUtils.nowMs().toOffsetDateTime().toString();
+		String timestamp = fallbackOnsTimestamp;
 		Map<String,Object> paths = new LinkedHashMap<>();
 		paths.put(
 				"/content[id0.0.2,1]/data[id3,1]/events[id4,1]/time[1]/value",
@@ -202,14 +235,14 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 	}
 
 	private String buildBloodPressurePayload(Map<String,Object> compact,
-			int onsId) {
+			int onsId, String fallbackOnsTimestamp, ZoneId queueZone) {
 		int diastolic = (int)Math.round(requireNumber(compact, "diastolic"));
 		int systolic = (int)Math.round(requireNumber(compact, "systolic"));
 		int meanArterialPressure = (int)Math.round(
 				requireNumber(compact, "meanArterialPressure", "map"));
 		String timestamp = compact.containsKey("timestamp") ?
-				compact.get("timestamp").toString() :
-				DateTimeUtils.nowMs().toOffsetDateTime().toString();
+				toOnsTimestampString(compact.get("timestamp"), queueZone) :
+				fallbackOnsTimestamp;
 		String comment = compact.containsKey("comment") ?
 				compact.get("comment").toString() : "Opmerking";
 
@@ -315,6 +348,111 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 		return requireNumber(map, fallbackKey);
 	}
 
+	private String toOnsTimestampString(Object value, ZoneId defaultZone) {
+		ZoneId zone = defaultZone != null ? defaultZone : ZoneOffset.UTC;
+		if (value == null)
+			return formatInstantForOns(Instant.now(), zone);
+		if (value instanceof Number number) {
+			return formatInstantForOns(Instant.ofEpochMilli(number.longValue()),
+					zone);
+		}
+		String str = value.toString();
+		if (str == null || str.isBlank())
+			return formatInstantForOns(Instant.now(), zone);
+		str = str.trim();
+		if (str.matches("^-?\\d+$")) {
+			long epoch = Long.parseLong(str);
+			if (str.length() <= 10)
+				epoch *= 1000L;
+			return formatInstantForOns(Instant.ofEpochMilli(epoch), zone);
+		}
+		try {
+			return formatInstantForOns(Instant.parse(str), zone);
+		} catch (Exception ignored) {
+			// Continue with other formats.
+		}
+		try {
+			return formatInstantForOns(OffsetDateTime.parse(str).toInstant(), zone);
+		} catch (Exception ignored) {
+			// Continue with other formats.
+		}
+		try {
+			return formatInstantForOns(ZonedDateTime.parse(str).toInstant(), zone);
+		} catch (Exception ignored) {
+			// Continue with local date/time fallback.
+		}
+		try {
+			ZonedDateTime zonedTime = LocalDateTime.parse(str).atZone(zone);
+			return ONS_UTC_TIME_FORMAT.format(zonedTime.toOffsetDateTime());
+		} catch (Exception ex) {
+			throw new IllegalArgumentException("Invalid timestamp format");
+		}
+	}
+
+	private String formatInstantForOns(Instant instant, ZoneId zone) {
+		return ONS_UTC_TIME_FORMAT.format(instant.atZone(zone).toOffsetDateTime());
+	}
+
+	private ZoneId parseZoneId(Object zoneValue) {
+		if (zoneValue == null)
+			return ZoneOffset.UTC;
+		String zone = zoneValue.toString();
+		if (zone == null || zone.isBlank())
+			return ZoneOffset.UTC;
+		try {
+			return ZoneId.of(zone.trim());
+		} catch (Exception ex) {
+			return ZoneOffset.UTC;
+		}
+	}
+
+	private ZoneId parseZoneIdIfPresent(Object zoneValue) {
+		if (zoneValue == null)
+			return null;
+		String zone = zoneValue.toString();
+		if (zone == null || zone.isBlank())
+			return null;
+		try {
+			return ZoneId.of(zone.trim());
+		} catch (Exception ex) {
+			return null;
+		}
+	}
+
+	private ZoneId resolveUserZoneId(String ssaId, ZoneId fallbackZone) {
+		ZoneId defaultZone = fallbackZone != null ? fallbackZone : ZoneOffset.UTC;
+		try {
+			UserCache userCache = UserCache.getInstance();
+			if (userCache != null) {
+				User user = userCache.findByUserid(ssaId);
+				ZoneId zone = parseZoneIdIfPresent(
+						user != null ? user.getTimeZone() : null);
+				if (zone != null)
+					return zone;
+			}
+		} catch (Exception ignored) {
+			// Fall back to direct DB lookup.
+		}
+		DatabaseLoader dbLoader = DatabaseLoader.getInstance();
+		DatabaseConnection conn = null;
+		try {
+			conn = dbLoader.openConnection();
+			Database authDb = dbLoader.initAuthDatabase(conn);
+			DatabaseCriteria criteria = new DatabaseCriteria.Equal("userid", ssaId);
+			User user = authDb.selectOne(new UserTable(), criteria, null);
+			ZoneId zone = parseZoneIdIfPresent(
+					user != null ? user.getTimeZone() : null);
+			if (zone != null)
+				return zone;
+		} catch (Exception ignored) {
+			// Use fallback zone.
+		} finally {
+			if (conn != null)
+				conn.close();
+		}
+		return defaultZone;
+	}
+
 	private String normalizeType(String type) {
 		if (type == null)
 			return null;
@@ -400,6 +538,12 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 	}
 
 	private OutgoingEndpoint getOutgoingEndpoint() {
+		String overrideUrl = System.getProperty(PROP_OUTGOING_URL);
+		if (overrideUrl != null && !overrideUrl.isBlank()) {
+			boolean mtls = Boolean.parseBoolean(
+					System.getProperty(PROP_OUTGOING_MTLS, "false"));
+			return new OutgoingEndpoint("override", URI.create(overrideUrl), mtls);
+		}
 		if (USE_ONS_ENDPOINT) {
 			return new OutgoingEndpoint("ons", URI.create(ONS_URL), true);
 		}

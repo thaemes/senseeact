@@ -19,6 +19,10 @@ dependencies {
 	api project(':SenSeeActServiceLib')
 	api 'com.google.zxing:core:3.5.3'
 	api 'com.google.zxing:javase:3.5.3'
+
+	testImplementation platform('org.junit:junit-bom:5.10.2')
+	testImplementation 'org.junit.jupiter:junit-jupiter'
+	testImplementation 'com.squareup.okhttp3:mockwebserver:4.12.0'
 }
 
 tasks.withType(JavaCompile) {
@@ -27,6 +31,33 @@ tasks.withType(JavaCompile) {
 
 test {
 	testLogging.showStandardStreams = true
+	useJUnitPlatform()
+}
+
+sourceSets {
+	integrationTest {
+		java {
+			srcDir 'src/integrationTest/java'
+		}
+		resources {
+			srcDir 'src/integrationTest/resources'
+		}
+		compileClasspath += sourceSets.main.output + configurations.testRuntimeClasspath
+		runtimeClasspath += output + compileClasspath
+	}
+}
+
+configurations {
+	integrationTestImplementation.extendsFrom testImplementation
+	integrationTestRuntimeOnly.extendsFrom testRuntimeOnly
+}
+
+tasks.register('integrationTest', Test) {
+	description = 'Runs integration tests.'
+	group = 'verification'
+	testClassesDirs = sourceSets.integrationTest.output.classesDirs
+	classpath = sourceSets.integrationTest.runtimeClasspath
+	useJUnitPlatform()
 }
 
 javadoc {
