@@ -77,7 +77,7 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 	private static final Object RETRY_TASK_LOCK = new Object();
 	private static final Set<String> RETRY_TASK_PROJECTS = new HashSet<>();
 	private static final DateTimeFormatter ONS_UTC_TIME_FORMAT =
-			DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssXX");
+			DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssXXX");
 
 	private final String project;
 	private final Object HTTP_CLIENT_LOCK = new Object();
@@ -175,7 +175,8 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 			throw new IllegalArgumentException("Invalid compact payload JSON");
 		}
 		if ("heartrate".equals(type)) {
-			return buildHeartRatePayload(compact, onsId, fallbackOnsTimestamp);
+			return buildHeartRatePayload(compact, onsId, fallbackOnsTimestamp,
+					queueZone);
 		} else if ("bloodpressure".equals(type)) {
 			return buildBloodPressurePayload(compact, onsId, fallbackOnsTimestamp,
 					queueZone);
@@ -185,7 +186,7 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 	}
 
 	private String buildHeartRatePayload(Map<String,Object> compact, int onsId,
-			String fallbackOnsTimestamp) {
+			String fallbackOnsTimestamp, ZoneId queueZone) {
 		double bpmValue = requireNumber(compact, "value");
 		int bpm = (int)Math.round(bpmValue);
 		String comment = "Opmerking";
@@ -194,7 +195,8 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 			if (commentValue != null && !commentValue.toString().isBlank())
 				comment = commentValue.toString();
 		}
-		String timestamp = fallbackOnsTimestamp;
+		String timestamp = resolvePayloadOnsTimestamp(compact, queueZone,
+				fallbackOnsTimestamp);
 		Map<String,Object> paths = new LinkedHashMap<>();
 		paths.put(
 				"/content[id0.0.2,1]/data[id3,1]/events[id4,1]/time[1]/value",
@@ -240,9 +242,8 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 		int systolic = (int)Math.round(requireNumber(compact, "systolic"));
 		int meanArterialPressure = (int)Math.round(
 				requireNumber(compact, "meanArterialPressure", "map"));
-		String timestamp = compact.containsKey("timestamp") ?
-				toOnsTimestampString(compact.get("timestamp"), queueZone) :
-				fallbackOnsTimestamp;
+		String timestamp = resolvePayloadOnsTimestamp(compact, queueZone,
+				fallbackOnsTimestamp);
 		String comment = compact.containsKey("comment") ?
 				compact.get("comment").toString() : "Opmerking";
 
@@ -348,6 +349,17 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 		return requireNumber(map, fallbackKey);
 	}
 
+	private String resolvePayloadOnsTimestamp(Map<String,Object> compact,
+			ZoneId fallbackZone, String fallbackOnsTimestamp) {
+		ZoneId zone = parseZoneIdIfPresent(compact.get("timeZone"));
+		if (zone == null)
+			zone = fallbackZone != null ? fallbackZone : ZoneOffset.UTC;
+		Object utcMillis = compact.get("timestampUtcMillis");
+		if (utcMillis != null)
+			return toOnsTimestampString(utcMillis, zone);
+		return fallbackOnsTimestamp;
+	}
+
 	private String toOnsTimestampString(Object value, ZoneId defaultZone) {
 		ZoneId zone = defaultZone != null ? defaultZone : ZoneOffset.UTC;
 		if (value == null)
@@ -366,27 +378,7 @@ public class DetoxMessageQueueListener implements DatabaseActionListener {
 				epoch *= 1000L;
 			return formatInstantForOns(Instant.ofEpochMilli(epoch), zone);
 		}
-		try {
-			return formatInstantForOns(Instant.parse(str), zone);
-		} catch (Exception ignored) {
-			// Continue with other formats.
-		}
-		try {
-			return formatInstantForOns(OffsetDateTime.parse(str).toInstant(), zone);
-		} catch (Exception ignored) {
-			// Continue with other formats.
-		}
-		try {
-			return formatInstantForOns(ZonedDateTime.parse(str).toInstant(), zone);
-		} catch (Exception ignored) {
-			// Continue with local date/time fallback.
-		}
-		try {
-			ZonedDateTime zonedTime = LocalDateTime.parse(str).atZone(zone);
-			return ONS_UTC_TIME_FORMAT.format(zonedTime.toOffsetDateTime());
-		} catch (Exception ex) {
-			throw new IllegalArgumentException("Invalid timestamp format");
-		}
+		throw new IllegalArgumentException("Invalid timestamp format");
 	}
 
 	private String formatInstantForOns(Instant instant, ZoneId zone) {

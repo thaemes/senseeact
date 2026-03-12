@@ -50,6 +50,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.util.*;
 
@@ -1403,21 +1404,17 @@ public class ProjectControllerExecution {
 		ZoneId defaultTz = subject != null ? subject.toTimeZone() :
 				user.toTimeZone();
 		CommonCrudController.validateWriteRecordTime(defaultTz, result, map);
-		validateDetoxQueueWriteRecord(table, result, defaultTz);
+		validateDetoxQueueWriteRecord(table, result, defaultTz, map);
 		return result;
 	}
 
 	private void validateDetoxQueueWriteRecord(DatabaseTableDef<?> table,
-			DatabaseObject record, ZoneId defaultTz) throws HttpException {
+			DatabaseObject record, ZoneId defaultTz, Map<?,?> recordMap)
+			throws HttpException {
 		if (!DetoxMessageQueueTable.NAME.equals(table.getName()) ||
 				!(record instanceof DetoxMessageQueue detoxMessage)) {
 			return;
 		}
-		// Normalize detox queue time fields to the caller/subject timezone so
-		// downstream integrations can use regional wall time consistently.
-		ZonedDateTime normalizedTzTime = ZonedDateTime.ofInstant(
-				Instant.ofEpochMilli(detoxMessage.getUtcTime()), defaultTz);
-		detoxMessage.updateDateTime(normalizedTzTime);
 		String normalizedType = normalizeDetoxType(detoxMessage.getType());
 		if (normalizedType == null) {
 			throw BadRequestException.withInvalidInput(new HttpFieldError("type",
@@ -1425,6 +1422,13 @@ public class ProjectControllerExecution {
 		}
 		detoxMessage.setType(normalizedType);
 		Map<?,?> payload = parseDetoxPayload(detoxMessage.getPayload());
+		ZoneId payloadZone = validateDetoxPayloadTime(payload, defaultTz);
+		ZoneId recordZone = recordMap.containsKey("timezone")
+				? detoxMessage.toTimeZone()
+				: payloadZone;
+		ZonedDateTime normalizedTzTime = ZonedDateTime.ofInstant(
+				Instant.ofEpochMilli(detoxMessage.getUtcTime()), recordZone);
+		detoxMessage.updateDateTime(normalizedTzTime);
 		if ("heartrate".equals(normalizedType)) {
 			requireDetoxNumber(payload, "value");
 		} else if ("bloodpressure".equals(normalizedType)) {
@@ -1434,6 +1438,19 @@ public class ProjectControllerExecution {
 				requireDetoxNumber(payload, "meanArterialPressure");
 			else
 				requireDetoxNumber(payload, "map");
+		}
+	}
+
+	private ZoneId validateDetoxPayloadTime(Map<?,?> payload, ZoneId defaultTz)
+			throws HttpException {
+		long utcMillis = requireDetoxLong(payload, "timestampUtcMillis");
+		Object timeZoneValue = payload.get("timeZone");
+		if (timeZoneValue == null || timeZoneValue.toString().isBlank())
+			return defaultTz != null ? defaultTz : ZoneOffset.UTC;
+		try {
+			return ZoneId.of(timeZoneValue.toString().trim());
+		} catch (Exception ex) {
+			return defaultTz != null ? defaultTz : ZoneOffset.UTC;
 		}
 	}
 
@@ -1487,6 +1504,36 @@ public class ProjectControllerExecution {
 		}
 		throw BadRequestException.withInvalidInput(new HttpFieldError("payload",
 				"Invalid numeric field \"" + key + "\""));
+	}
+
+	private static long requireDetoxLong(Map<?,?> map, String key)
+			throws HttpException {
+		Object value = map.get(key);
+		if (value == null) {
+			throw BadRequestException.withInvalidInput(new HttpFieldError(
+					"payload", "Missing required field \"" + key + "\""));
+		}
+		if (value instanceof Number number)
+			return number.longValue();
+		if (value instanceof String stringValue) {
+			try {
+				return Long.parseLong(stringValue);
+			} catch (NumberFormatException ignored) {
+				// throw below
+			}
+		}
+		throw BadRequestException.withInvalidInput(new HttpFieldError("payload",
+				"Invalid numeric field \"" + key + "\""));
+	}
+
+	private static String requireDetoxString(Map<?,?> map, String key)
+			throws HttpException {
+		Object value = map.get(key);
+		if (value == null || value.toString().isBlank()) {
+			throw BadRequestException.withInvalidInput(new HttpFieldError(
+					"payload", "Missing required field \"" + key + "\""));
+		}
+		return value.toString();
 	}
 
 	/**
