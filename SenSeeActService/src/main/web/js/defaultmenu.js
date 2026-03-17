@@ -12,6 +12,9 @@ class DefaultMenuController {
 		menuController.appendSubMenuItem('me', 'me-download',
 			i18next.t('download_data'),
 			basePath + '/me/download');
+		menuController.appendSubMenuItem('me', 'me-link-phone',
+			i18next.t('link_phone'),
+			basePath + '/me/link-phone');
 	}
 }
 

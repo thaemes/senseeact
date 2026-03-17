@@ -119,6 +119,39 @@ public class UserController {
 						projectCode),
 				versionName, request, response);
 	}
+
+	@RequestMapping(value="/detox/ons-lookup", method=RequestMethod.GET)
+	public DetoxOnsLookup getDetoxOnsLookup(
+			HttpServletRequest request,
+			HttpServletResponse response,
+			@PathVariable("version")
+			@Parameter(hidden = true)
+			String versionName,
+			@RequestParam(value="onsId")
+			final String onsId) throws HttpException, Exception {
+		return QueryRunner.runAuthQuery(
+				(version, authDb, user, authDetails) ->
+				doGetDetoxOnsLookup(authDb, user, onsId),
+				versionName, request, response);
+	}
+
+	@RequestMapping(value="/detox/ons-relink", method=RequestMethod.POST)
+	public DetoxOnsSignupResult relinkDetoxUserForOns(
+			HttpServletRequest request,
+			HttpServletResponse response,
+			@PathVariable("version")
+			@Parameter(hidden = true)
+			String versionName,
+			@RequestParam(value="onsId")
+			final String onsId,
+			@RequestParam(value="project", required=false, defaultValue="")
+			final String projectCode) throws HttpException, Exception {
+		return QueryRunner.runAuthQuery(
+				(version, authDb, user, authDetails) ->
+				doRelinkDetoxUserForOns(version, authDb, user, onsId,
+						projectCode),
+				versionName, request, response);
+	}
 	
 	@RequestMapping(value="/", method=RequestMethod.PUT)
 	@RequestBody(
@@ -279,14 +312,6 @@ public class UserController {
 		if (currUser.getRole() != Role.PROFESSIONAL)
 			throw new ForbiddenException();
 		int onsId = parseOnsId(onsIdParam);
-		DetoxOnsLookup existing = DetoxOnsLookup.findByOnsId(authDb, onsId);
-		if (existing != null) {
-			String message = "ONS ID already linked to SSA ID " +
-					existing.getSsaId();
-			HttpError error = new HttpError(ErrorCode.INVALID_INPUT, message);
-			error.addFieldError(new HttpFieldError("onsId", message));
-			throw new BadRequestException(error);
-		}
 		BaseProject project = null;
 		if (projectCode != null && !projectCode.isBlank()) {
 			ProjectRepository projects = AppComponents.get(
@@ -342,6 +367,32 @@ public class UserController {
 		result.setQrPayload(qrPayload);
 		result.setQrPngBase64(qrPngBase64);
 		return result;
+	}
+
+	private DetoxOnsLookup doGetDetoxOnsLookup(Database authDb, User currUser,
+			String onsIdParam) throws HttpException, Exception {
+		if (currUser.getRole() != Role.PROFESSIONAL)
+			throw new ForbiddenException();
+		int onsId = parseOnsId(onsIdParam);
+		DetoxOnsLookup lookup = DetoxOnsLookup.findByOnsId(authDb, onsId);
+		if (lookup == null)
+			throw new NotFoundException("ONS ID not linked");
+		return lookup;
+	}
+
+	private DetoxOnsSignupResult doRelinkDetoxUserForOns(ProtocolVersion version,
+			Database authDb, User currUser, String onsIdParam,
+			String projectCode) throws HttpException, Exception {
+		if (currUser.getRole() != Role.PROFESSIONAL)
+			throw new ForbiddenException();
+		int onsId = parseOnsId(onsIdParam);
+		DetoxOnsLookup existing = DetoxOnsLookup.findByOnsId(authDb, onsId);
+		if (existing == null)
+			throw new NotFoundException("ONS ID not linked");
+		DatabaseCriteria criteria = new DatabaseCriteria.Equal("onsId", onsId);
+		authDb.delete(new DetoxOnsLookupTable(), criteria);
+		return doSignupDetoxUserForOns(version, authDb, currUser, onsIdParam,
+				projectCode);
 	}
 
 	private int parseOnsId(String onsIdParam) throws BadRequestException {
