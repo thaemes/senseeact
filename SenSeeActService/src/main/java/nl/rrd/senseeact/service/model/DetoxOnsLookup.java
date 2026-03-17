@@ -41,12 +41,26 @@ public class DetoxOnsLookup extends BaseDatabaseObject {
 		return authDb.selectOne(new DetoxOnsLookupTable(), criteria, null);
 	}
 
+	public static DetoxOnsLookup findByOnsId(Database authDb, int onsId)
+			throws DatabaseException {
+		DatabaseCriteria criteria = new DatabaseCriteria.Equal("onsId", onsId);
+		return authDb.selectOne(new DetoxOnsLookupTable(), criteria, null);
+	}
+
 	public static Integer findOnsId(Database authDb, String ssaId)
 			throws DatabaseException {
 		DetoxOnsLookup lookup = findBySsaId(authDb, ssaId);
 		if (lookup == null)
 			return null;
 		return lookup.getOnsId();
+	}
+
+	public static String findSsaId(Database authDb, int onsId)
+			throws DatabaseException {
+		DetoxOnsLookup lookup = findByOnsId(authDb, onsId);
+		if (lookup == null)
+			return null;
+		return lookup.getSsaId();
 	}
 
 	public static DetoxOnsLookup save(Database authDb, String ssaId, int onsId)

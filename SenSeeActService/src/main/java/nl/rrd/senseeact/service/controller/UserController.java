@@ -3,6 +3,11 @@ package nl.rrd.senseeact.service.controller;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.zxing.BarcodeFormat;
+import com.google.zxing.WriterException;
+import com.google.zxing.client.j2se.MatrixToImageWriter;
+import com.google.zxing.common.BitMatrix;
+import com.google.zxing.qrcode.QRCodeWriter;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.media.Content;
 import io.swagger.v3.oas.annotations.media.Schema;
@@ -15,6 +20,7 @@ import nl.rrd.senseeact.client.exception.HttpFieldError;
 import nl.rrd.senseeact.client.model.ListUser;
 import nl.rrd.senseeact.client.model.Role;
 import nl.rrd.senseeact.client.model.compat.*;
+import nl.rrd.senseeact.client.model.detox.DetoxOnsSignupResult;
 import nl.rrd.senseeact.client.project.BaseProject;
 import nl.rrd.senseeact.client.project.ProjectRepository;
 import nl.rrd.senseeact.dao.*;
@@ -42,6 +48,7 @@ import nl.rrd.utils.validation.ValidationException;
 import org.slf4j.Logger;
 import org.springframework.web.bind.annotation.*;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.time.ZonedDateTime;
@@ -50,6 +57,9 @@ import java.util.*;
 @RestController
 @RequestMapping("/v{version}/user")
 public class UserController {
+	private static final int DETOX_QR_SIZE = 360;
+	private static final int DETOX_EMAIL_ATTEMPTS = 5;
+
 	public static final List<String> CHANGE_FORBIDDEN_FIELDS = List.of(
 			"userid",
 			"emailVerified",
@@ -89,6 +99,24 @@ public class UserController {
 		return QueryRunner.runAuthQuery(
 				(version, authDb, user, authDetails) ->
 				doGetUser(version, authDb, user, userId, email),
+				versionName, request, response);
+	}
+
+	@RequestMapping(value="/detox/ons-signup", method=RequestMethod.POST)
+	public DetoxOnsSignupResult signupDetoxUserForOns(
+			HttpServletRequest request,
+			HttpServletResponse response,
+			@PathVariable("version")
+			@Parameter(hidden = true)
+			String versionName,
+			@RequestParam(value="onsId")
+			final String onsId,
+			@RequestParam(value="project", required=false, defaultValue="")
+			final String projectCode) throws HttpException, Exception {
+		return QueryRunner.runAuthQuery(
+				(version, authDb, user, authDetails) ->
+				doSignupDetoxUserForOns(version, authDb, user, onsId,
+						projectCode),
 				versionName, request, response);
 	}
 	
@@ -243,6 +271,133 @@ public class UserController {
 		UserListenerRepository.getInstance().notifyUserRoleChanged(setUser,
 				oldRole);
 		return null;
+	}
+
+	private DetoxOnsSignupResult doSignupDetoxUserForOns(ProtocolVersion version,
+			Database authDb, User currUser, String onsIdParam,
+			String projectCode) throws HttpException, Exception {
+		if (currUser.getRole() != Role.PROFESSIONAL)
+			throw new ForbiddenException();
+		int onsId = parseOnsId(onsIdParam);
+		DetoxOnsLookup existing = DetoxOnsLookup.findByOnsId(authDb, onsId);
+		if (existing != null) {
+			String message = "ONS ID already linked to SSA ID " +
+					existing.getSsaId();
+			HttpError error = new HttpError(ErrorCode.INVALID_INPUT, message);
+			error.addFieldError(new HttpFieldError("onsId", message));
+			throw new BadRequestException(error);
+		}
+		BaseProject project = null;
+		if (projectCode != null && !projectCode.isBlank()) {
+			ProjectRepository projects = AppComponents.get(
+					ProjectRepository.class);
+			project = projects.findProjectByCode(projectCode);
+			if (project == null) {
+				HttpFieldError error = new HttpFieldError("project",
+						"Project not found: " + projectCode);
+				throw BadRequestException.withInvalidInput(error);
+			}
+		}
+		UserCache userCache = UserCache.getInstance();
+		String email = createUniqueTempEmail(userCache);
+		String password = UUID.randomUUID().toString().toLowerCase()
+				.replaceAll("-", "");
+		User newUser = new User();
+		newUser.setUserid(UUID.randomUUID().toString().toLowerCase()
+				.replaceAll("-", ""));
+		newUser.setEmail(email);
+		newUser.setHasTemporaryEmail(true);
+		ZonedDateTime now = DateTimeUtils.nowMs();
+		newUser.setCreated(now);
+		newUser.setLastActive(now);
+		newUser.setRole(Role.PATIENT);
+		ModelValidation.validate(newUser);
+		AuthControllerExecution.setPassword(newUser, password, "password",
+				true);
+		String qrPayload = buildDetoxQrPayload(newUser.getUserid(),
+				email, password);
+		String qrPngBase64 = createQrPngBase64(qrPayload);
+		if (project != null) {
+			try {
+				project.validateAddUser(currUser, newUser, authDb);
+			} catch (ValidationException ex) {
+				throw new ForbiddenException(ex.getMessage());
+			}
+		}
+		userCache.createUser(authDb, newUser);
+		if (project != null) {
+			UserProject userProject = new UserProject();
+			userProject.setUser(newUser.getUserid());
+			userProject.setProjectCode(project.getCode());
+			userProject.setAsRole(Role.PATIENT);
+			authDb.insert(UserProjectTable.NAME, userProject);
+			UserListenerRepository.getInstance().notifyUserAddedToProject(newUser,
+					project.getCode(), Role.PATIENT);
+		}
+		DetoxOnsLookup.save(authDb, newUser.getUserid(), onsId);
+		DetoxOnsSignupResult result = new DetoxOnsSignupResult();
+		result.setSsaId(newUser.getUserid());
+		result.setEmail(email);
+		result.setPassword(password);
+		result.setQrPayload(qrPayload);
+		result.setQrPngBase64(qrPngBase64);
+		return result;
+	}
+
+	private int parseOnsId(String onsIdParam) throws BadRequestException {
+		List<HttpFieldError> errors = new ArrayList<>();
+		if (onsIdParam == null || onsIdParam.isBlank()) {
+			errors.add(new HttpFieldError("onsId",
+					"Parameter \"onsId\" not defined"));
+		}
+		int onsId = 0;
+		if (errors.isEmpty()) {
+			try {
+				onsId = Integer.parseInt(onsIdParam);
+			} catch (NumberFormatException ex) {
+				errors.add(new HttpFieldError("onsId",
+						"ONS ID must be an integer"));
+			}
+		}
+		if (errors.isEmpty() && onsId <= 0) {
+			errors.add(new HttpFieldError("onsId",
+					"ONS ID must be a positive integer"));
+		}
+		if (!errors.isEmpty())
+			throw BadRequestException.withInvalidInput(errors);
+		return onsId;
+	}
+
+	private String createUniqueTempEmail(UserCache userCache)
+			throws HttpException {
+		for (int i = 0; i < DETOX_EMAIL_ATTEMPTS; i++) {
+			String email = UUID.randomUUID().toString().toLowerCase()
+					.replaceAll("-", "") + "@temp.senseeact.com";
+			if (!userCache.emailExists(email))
+				return email;
+		}
+		throw new BadRequestException(new HttpError(ErrorCode.INVALID_INPUT,
+				"Failed to generate a unique temporary email address"));
+	}
+
+	private String buildDetoxQrPayload(String ssaId, String email,
+			String password) throws JsonProcessingException {
+		Map<String,Object> payload = new LinkedHashMap<>();
+		payload.put("ssaId", ssaId);
+		payload.put("email", email);
+		payload.put("password", password);
+		ObjectMapper mapper = new ObjectMapper();
+		return mapper.writeValueAsString(payload);
+	}
+
+	private String createQrPngBase64(String payload)
+			throws WriterException, IOException {
+		QRCodeWriter writer = new QRCodeWriter();
+		BitMatrix matrix = writer.encode(payload, BarcodeFormat.QR_CODE,
+				DETOX_QR_SIZE, DETOX_QR_SIZE);
+		ByteArrayOutputStream out = new ByteArrayOutputStream();
+		MatrixToImageWriter.writeToStream(matrix, "PNG", out);
+		return Base64.getEncoder().encodeToString(out.toByteArray());
 	}
 	
 	private Object doSetActive(ProtocolVersion version, Database authDb,
