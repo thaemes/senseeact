@@ -1,0 +1,53 @@
+#link-phone-error {
+	display: none;
+}
+
+#link-phone-already {
+	display: none;
+}
+
+#link-phone-wait {
+	display: none;
+	margin-left: auto;
+	margin-right: auto;
+}
+
+#link-phone-result {
+	display: none;
+	margin-top: 20px;
+}
+
+#link-phone-qr-box {
+	display: flex;
+	margin: 0 auto 12px auto;
+	width: 280px;
+	height: 280px;
+	box-sizing: border-box;
+	border: 1px solid #373844;
+	align-items: center;
+	justify-content: center;
+	background-color: white;
+}
+
+#link-phone-qr-box img {
+	width: 100%;
+	height: 100%;
+}
+
+#link-phone-qr-instruction {
+	margin-bottom: 8px;
+}
+
+#link-phone-credentials {
+	margin-top: 12px;
+}
+
+#link-phone-credentials .form-label {
+	color: #676767;
+}
+
+.credential-value {
+	font-family: 'Open Sans', sans-serif;
+	font-weight: 600;
+	word-break: break-all;
+}

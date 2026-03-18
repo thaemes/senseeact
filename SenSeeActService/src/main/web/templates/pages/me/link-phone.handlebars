@@ -1,0 +1,45 @@
+<link rel="stylesheet" type="text/css" href="../css/pages/me/link-phone.css"></link>
+<div class="fill-space">
+	<div class="page-back-header"></div>
+	<div class="form">
+		<div class="caption center" id="link-phone-intro" data-i18n="link_phone_intro"></div>
+
+		<div class="form-row" style="margin-top: 16px">
+			<div class="form-label" data-i18n="link_phone_ons_id"></div>
+			<div class="form-value" id="link-phone-ons-id"></div>
+		</div>
+		<div class="form-row">
+			<div class="form-label" data-i18n="link_phone_project_code"></div>
+			<div class="form-value" id="link-phone-project-code"></div>
+		</div>
+
+		<div id="link-phone-already" class="message center" style="margin-top: 16px"></div>
+		<div id="link-phone-error" class="message error center" style="margin-top: 16px"></div>
+
+		<div class="center" style="margin-top: 16px">
+			<button id="link-phone-submit" data-i18n="link_phone_generate_qr"></button>
+		</div>
+		<div id="link-phone-wait" class="wait-circle" style="margin-top: 16px"></div>
+
+		<div id="link-phone-result">
+			<div id="link-phone-qr-box">
+				<img id="link-phone-qr-img" alt="QR code" />
+			</div>
+			<div class="caption center" id="link-phone-qr-instruction" data-i18n="link_phone_scan_instruction"></div>
+			<div id="link-phone-credentials">
+				<div class="form-row">
+					<div class="form-label" data-i18n="link_phone_ssa_id"></div>
+					<div class="form-value"><div id="link-phone-ssa-id" class="credential-value"></div></div>
+				</div>
+				<div class="form-row">
+					<div class="form-label" data-i18n="link_phone_email"></div>
+					<div class="form-value"><div id="link-phone-email" class="credential-value"></div></div>
+				</div>
+			</div>
+		</div>
+	</div>
+</div>
+<div id="background-image"></div>
+<script type="text/javascript">
+	loadJS('pages/me/link-phone');
+</script>
