@@ -23,7 +23,12 @@ function initPage() {
 	let pagePath = url.path.substring(basePath.length).replace(/^\/+/, '')
 	let trimmedPagePath = pagePath.replace(/\/+$/, '')
 	if (pagePath != trimmedPagePath) {
-		window.location.href = basePath + '/' + trimmedPagePath;
+		let redirectUrl = basePath + '/' + trimmedPagePath;
+		if (url.paramsString && url.paramsString.length > 0)
+			redirectUrl += '?' + url.paramsString;
+		if (url.anchor && url.anchor.length > 0)
+			redirectUrl += '#' + url.anchor;
+		window.location.href = redirectUrl;
 		return;
 	}
 	let context = {
@@ -246,9 +251,14 @@ function uuidv4() {
 
 function checkLogin(onSuccess, redirectOnFail = true) {
 	let path = '/me';
-	let absPath = getUrlPath(window.location.href);
+	let url = parseURL(window.location.href);
+	let absPath = url.path;
 	if (absPath.startsWith(basePath))
 		path = absPath.substring(basePath.length);
+	if (url.paramsString && url.paramsString.length > 0)
+		path += '?' + url.paramsString;
+	if (url.anchor && url.anchor.length > 0)
+		path += '#' + url.anchor;
 	let client = new SenSeeActClient();
 	client.getUser()
 		.done(function(data) {

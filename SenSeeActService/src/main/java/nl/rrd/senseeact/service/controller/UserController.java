@@ -312,14 +312,17 @@ public class UserController {
 		if (currUser.getRole() != Role.PROFESSIONAL)
 			throw new ForbiddenException();
 		int onsId = parseOnsId(onsIdParam);
+		String resolvedProjectCode = projectCode;
+		if (resolvedProjectCode == null || resolvedProjectCode.isBlank())
+			resolvedProjectCode = "detox";
 		BaseProject project = null;
-		if (projectCode != null && !projectCode.isBlank()) {
+		if (resolvedProjectCode != null && !resolvedProjectCode.isBlank()) {
 			ProjectRepository projects = AppComponents.get(
 					ProjectRepository.class);
-			project = projects.findProjectByCode(projectCode);
+			project = projects.findProjectByCode(resolvedProjectCode);
 			if (project == null) {
 				HttpFieldError error = new HttpFieldError("project",
-						"Project not found: " + projectCode);
+						"Project not found: " + resolvedProjectCode);
 				throw BadRequestException.withInvalidInput(error);
 			}
 		}
@@ -339,8 +342,8 @@ public class UserController {
 		ModelValidation.validate(newUser);
 		AuthControllerExecution.setPassword(newUser, password, "password",
 				true);
-		String qrPayload = buildDetoxQrPayload(newUser.getUserid(),
-				email, password);
+		String qrPayload = buildDetoxQrPayload(email, password,
+				resolvedProjectCode);
 		String qrPngBase64 = createQrPngBase64(qrPayload);
 		if (project != null) {
 			try {
@@ -431,14 +434,14 @@ public class UserController {
 				"Failed to generate a unique temporary email address"));
 	}
 
-	private String buildDetoxQrPayload(String ssaId, String email,
-			String password) throws JsonProcessingException {
-		Map<String,Object> payload = new LinkedHashMap<>();
-		payload.put("ssaId", ssaId);
-		payload.put("email", email);
-		payload.put("password", password);
-		ObjectMapper mapper = new ObjectMapper();
-		return mapper.writeValueAsString(payload);
+	private String buildDetoxQrPayload(String email, String password,
+			String projectCode) {
+		String project = projectCode;
+		if (project == null || project.isBlank())
+			project = "detox";
+		return "detox://configure?email=" + email +
+				"&password=" + password +
+				"&project=" + project;
 	}
 
 	private String createQrPngBase64(String payload)
