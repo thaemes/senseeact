@@ -45,6 +45,15 @@ public class Configuration extends BaseConfiguration {
 			"detoxOutgoingMtlsCertPath";
 	public static final String DETOX_OUTGOING_MTLS_KEY_PATH =
 			"detoxOutgoingMtlsKeyPath";
+	public static final String DETOX_ONS_INSTANCES = "detoxOnsInstances";
+	public static final String DETOX_ONS_DEFAULT_INSTANCE =
+			"detoxOnsDefaultInstance";
+	public static final String DETOX_ONS_INSTANCE_PREFIX = "detoxOnsInstance.";
+	public static final String DETOX_ONS_INSTANCE_BASE_URL_SUFFIX = ".baseUrl";
+	public static final String DETOX_ONS_INSTANCE_MTLS_CERT_PATH_SUFFIX =
+			".mtlsCertPath";
+	public static final String DETOX_ONS_INSTANCE_MTLS_KEY_PATH_SUFFIX =
+			".mtlsKeyPath";
 
 	@Override
 	public String getBaseUrl() {

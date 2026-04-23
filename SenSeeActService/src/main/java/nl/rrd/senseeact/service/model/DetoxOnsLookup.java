@@ -10,7 +10,6 @@ import nl.rrd.utils.exception.DatabaseException;
 /**
  * Lookup table entry to map an SSA ID to an ONS ID.
  *
- * @author Dennis Hofs (RRD)
  */
 public class DetoxOnsLookup extends BaseDatabaseObject {
 	@DatabaseField(value=DatabaseType.STRING, index=true)
@@ -18,6 +17,9 @@ public class DetoxOnsLookup extends BaseDatabaseObject {
 
 	@DatabaseField(value=DatabaseType.INT)
 	private int onsId;
+
+	@DatabaseField(value=DatabaseType.STRING)
+	private String onsInstance;
 
 	public String getSsaId() {
 		return ssaId;
@@ -35,6 +37,14 @@ public class DetoxOnsLookup extends BaseDatabaseObject {
 		this.onsId = onsId;
 	}
 
+	public String getOnsInstance() {
+		return onsInstance;
+	}
+
+	public void setOnsInstance(String onsInstance) {
+		this.onsInstance = normalizeOnsInstance(onsInstance);
+	}
+
 	public static DetoxOnsLookup findBySsaId(Database authDb, String ssaId)
 			throws DatabaseException {
 		DatabaseCriteria criteria = new DatabaseCriteria.Equal("ssaId", ssaId);
@@ -44,6 +54,15 @@ public class DetoxOnsLookup extends BaseDatabaseObject {
 	public static DetoxOnsLookup findByOnsId(Database authDb, int onsId)
 			throws DatabaseException {
 		DatabaseCriteria criteria = new DatabaseCriteria.Equal("onsId", onsId);
+		return authDb.selectOne(new DetoxOnsLookupTable(), criteria, null);
+	}
+
+	public static DetoxOnsLookup findByOnsId(Database authDb, int onsId,
+			String onsInstance) throws DatabaseException {
+		DatabaseCriteria criteria = new DatabaseCriteria.And(
+				new DatabaseCriteria.Equal("onsId", onsId),
+				new DatabaseCriteria.Equal("onsInstance",
+						normalizeOnsInstance(onsInstance)));
 		return authDb.selectOne(new DetoxOnsLookupTable(), criteria, null);
 	}
 
@@ -63,18 +82,43 @@ public class DetoxOnsLookup extends BaseDatabaseObject {
 		return lookup.getSsaId();
 	}
 
+	public static String findSsaId(Database authDb, int onsId,
+			String onsInstance) throws DatabaseException {
+		DetoxOnsLookup lookup = findByOnsId(authDb, onsId, onsInstance);
+		if (lookup == null)
+			return null;
+		return lookup.getSsaId();
+	}
+
 	public static DetoxOnsLookup save(Database authDb, String ssaId, int onsId)
+			throws DatabaseException {
+		return save(authDb, ssaId, onsId, null);
+	}
+
+	public static DetoxOnsLookup save(Database authDb, String ssaId, int onsId,
+			String onsInstance)
 			throws DatabaseException {
 		DetoxOnsLookup lookup = findBySsaId(authDb, ssaId);
 		if (lookup == null) {
 			lookup = new DetoxOnsLookup();
 			lookup.setSsaId(ssaId);
 			lookup.setOnsId(onsId);
+			lookup.setOnsInstance(onsInstance);
 			authDb.insert(DetoxOnsLookupTable.NAME, lookup);
 		} else {
 			lookup.setOnsId(onsId);
+			lookup.setOnsInstance(onsInstance);
 			authDb.update(DetoxOnsLookupTable.NAME, lookup);
 		}
 		return lookup;
+	}
+
+	private static String normalizeOnsInstance(String onsInstance) {
+		if (onsInstance == null)
+			return null;
+		String result = onsInstance.trim();
+		if (result.isEmpty())
+			return null;
+		return result;
 	}
 }

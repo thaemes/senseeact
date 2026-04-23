@@ -12,6 +12,7 @@ class LinkPhonePage {
 	 * - _qrImg (jQuery element)
 	 * - _ssaIdValue (jQuery element)
 	 * - _emailValue (jQuery element)
+	 * - _onsInstance (string)
 	 */
 	constructor() {
 		this._user = null;
@@ -25,6 +26,7 @@ class LinkPhonePage {
 		this._qrImg = $('#link-phone-qr-img');
 		this._ssaIdValue = $('#link-phone-ssa-id');
 		this._emailValue = $('#link-phone-email');
+		this._onsInstance = null;
 		this._requestRunning = false;
 		this._generatedOnce = false;
 		var self = this;
@@ -100,6 +102,11 @@ class LinkPhonePage {
 			this._onsIdEdit.input.val(params['onsId']);
 		if (params['project'])
 			this._projectEdit.input.val(params['project']);
+		if (params['onsInstance']) {
+			let onsInstance = (params['onsInstance'] + '').trim();
+			if (onsInstance.length > 0)
+				this._onsInstance = onsInstance;
+		}
 	}
 
 	_onGenerateClick(clickId) {
@@ -172,6 +179,8 @@ class LinkPhonePage {
 	_checkExistingLinkAndSignup(clickId, onsId, project) {
 		let url = servicePath + '/user/detox/ons-lookup?onsId=' +
 			encodeURIComponent(onsId);
+		if (this._onsInstance)
+			url += '&onsInstance=' + encodeURIComponent(this._onsInstance);
 		var self = this;
 		$.ajax({
 			method: 'GET',
@@ -209,6 +218,8 @@ class LinkPhonePage {
 	_buildOnsSignupUrl(onsId, project) {
 		let url = servicePath + '/user/detox/ons-signup?onsId=' +
 			encodeURIComponent(onsId);
+		if (this._onsInstance)
+			url += '&onsInstance=' + encodeURIComponent(this._onsInstance);
 		if (project.length > 0)
 			url += '&project=' + encodeURIComponent(project);
 		return url;

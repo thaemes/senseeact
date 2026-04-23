@@ -34,10 +34,10 @@ public class DetoxMessageQueueOutgoingIT {
 
 			Method method = DetoxMessageQueueListener.class.getDeclaredMethod(
 					"sendProcessedToOns", String.class, String.class, int.class,
-					String.class);
+					String.class, String.class);
 			method.setAccessible(true);
 			boolean ok = (boolean) method.invoke(listener, "rid-1",
-					"ssa-1", 123, payload);
+					"ssa-1", 123, null, payload);
 
 			assertTrue(ok);
 
